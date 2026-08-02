@@ -3,7 +3,7 @@
 AI based texture de-lighter as the title suggests. 
 Its meant to remove environmental lighting from Photogrammetry assets.
 
-(https://github.com/vdmrcll/ai-texture-delightier/blob/main/preview.jpg)
+![Viewport Preview](https://github.com/vdmrcll/ai-texture-delightier/blob/main/preview.jpg)
 
 The application uses ONNX Runtime to run the included ONNX models.
 The launcher targets ONNX Runtime 1.19.2 for NVIDIA CUDA 11.8 and
