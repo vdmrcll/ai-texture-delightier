@@ -128,10 +128,6 @@ The launcher targets:
 
 CUDA execution is recommended for practical processing times. CPU mode is supported primarily as a fallback.
 
-## Preview
-
-![Viewport Preview](https://github.com/vdmrcll/ai-texture-delightier/blob/main/preview.jpg)
-
 ## Troubleshooting
 
 ### CUDA is not available
