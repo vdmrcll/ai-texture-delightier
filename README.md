@@ -68,7 +68,6 @@ The model was trained and optimized specifically for **2048×2048 textures**.
 
 * **1024×1024:** Not recommended and may produce artifacts.
 * **4096×4096 and larger:** Not recommended. Larger textures require substantially more VRAM and may exceed the available memory on typical GPUs.
-* Processing 4K textures may require approximately **24 GB of VRAM**, depending on the configuration.
 
 For the most predictable results, use **2048×2048 textures**.
 
@@ -76,24 +75,13 @@ For the most predictable results, use **2048×2048 textures**.
 
 ## Models
 
-The application supports two ONNX models:
-
-```text
-weights/
-├── delighter_model_fp16.onnx
-└── delighter_model_fp32.onnx
-```
-
-The GUI defaults to **FP16** and allows switching between the FP16 and FP32 models.
-
-For packaged builds, the `weights` directory should be located beside `Delighter.exe`:
+The `weights` directory should be located beside `Delighter.exe`:
 
 ```text
 Delighter/
 ├── Delighter.exe
 └── weights/
     ├── delighter_model_fp16.onnx
-    └── delighter_model_fp32.onnx
 ```
 
 ## Installation & Running
@@ -105,6 +93,12 @@ Delighter/
 
 ```text
 run.bat
+```
+
+or run:
+
+```text
+bash run.sh
 ```
 
 The launcher will:
@@ -126,8 +120,6 @@ The launcher targets:
 * NVIDIA CUDA **11.8**
 * cuDNN **8.9.5**
 
-CUDA execution is recommended for practical processing times. CPU mode is supported primarily as a fallback.
-
 ## Troubleshooting
 
 ### CUDA is not available
@@ -143,24 +135,12 @@ If the application falls back to CPU:
 
 Make sure:
 
-* All four input maps are provided.
+* The images have lossless compression (e.g. PNG instead of JPG)
 * The normal map is **Object Space / DirectX**.
 * The texture is processed in **sRGB**.
 * The input resolution is **2048×2048**.
 * The input maps have matching dimensions.
 * The source texture contains reasonable padding around UV islands.
-
-## Beta Testing & Feedback
-
-This project is currently in an **early beta** and your feedback is extremely valuable.
-
-If you encounter crashes, errors, unexpected results, or visual artifacts, please send an email containing:
-
-1. The text from the **Execution Log** window, if applicable.
-2. A description and/or screenshot of the problem.
-3. The format and resolution of your source textures.
-4. Your GPU model, if the issue is related to performance or CUDA.
-
 **Email:** [vdmrcll@gmail.com](mailto:vdmrcll@gmail.com)
 **Subject:** `De-light beta-test feedback`
 
