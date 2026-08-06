@@ -3,15 +3,16 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 
-# ONNX Runtime 1.19 does not automatically preload CUDA DLLs from NVIDIA's
-# Python packages. Keep the DLL directory handles alive for the process and
-# add the CUDA 11/cuDNN 8 package directories before creating a session.
+# ONNX Runtime 1.19 does not automatically preload CUDA libraries from
+# NVIDIA's Python packages. Configure both Windows DLL search and Linux
+# shared-library search before importing ONNX Runtime.
 _CUDA_DLL_HANDLES = []
 if os.name == "nt":
     _site_packages = Path(sys.prefix) / "Lib" / "site-packages"
@@ -26,6 +27,35 @@ if os.name == "nt":
         if _dll_dir.is_dir():
             os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
             _CUDA_DLL_HANDLES.append(os.add_dll_directory(str(_dll_dir)))
+elif sys.platform.startswith("linux"):
+    _site_packages = [Path(sysconfig.get_paths().get("purelib", ""))]
+    try:
+        _site_packages.extend(Path(path) for path in sysconfig.get_paths().get("platlib", "").split(os.pathsep) if path)
+    except AttributeError:
+        pass
+
+    _cuda_roots = []
+    for _cuda_env in ("CUDA_PATH", "CUDA_HOME"):
+        if os.environ.get(_cuda_env):
+            _cuda_roots.append(Path(os.environ[_cuda_env]))
+    _cuda_roots.extend((Path("/usr/local/cuda"), Path("/usr/local/cuda-11.8")))
+    _cuda_library_dirs = []
+    for _root in _cuda_roots:
+        _cuda_library_dirs.extend((_root / "lib64", _root / "lib"))
+    for _site_package in _site_packages:
+        for _relative_path in (
+            "nvidia/cuda_runtime/lib",
+            "nvidia/cuda_nvrtc/lib",
+            "nvidia/cublas/lib",
+            "nvidia/cufft/lib",
+            "nvidia/cudnn/lib",
+        ):
+            _cuda_library_dirs.append(_site_package / _relative_path)
+    _existing_cuda_dirs = [str(path) for path in _cuda_library_dirs if path.is_dir()]
+    if _existing_cuda_dirs:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+            _existing_cuda_dirs + [os.environ.get("LD_LIBRARY_PATH", "")]
+        ).strip(os.pathsep)
 
 import onnxruntime as ort
 
@@ -55,9 +85,8 @@ def _hardware_name_for_provider(provider: str) -> str:
                 pass
         return "NVIDIA GPU"
 
-    # The engine currently opts into CUDA and CPU only. Keep this fallback
-    # generic so a different ONNX Runtime build is not presented as supported
-    # before the provider is explicitly wired into the selection logic.
+    # Keep unknown providers generic so a different ONNX Runtime build is not
+    # presented as supported before the provider is explicitly wired in.
     return provider.replace("ExecutionProvider", "") + " device"
 
 
@@ -80,9 +109,6 @@ def _cpu_model_name() -> str:
             ],
             ["wmic", "cpu", "get", "name", "/value"],
         ]
-    elif platform.system() == "Darwin":
-        commands = [["sysctl", "-n", "machdep.cpu.brand_string"]]
-
     for command in commands:
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
@@ -117,7 +143,7 @@ def linear_to_srgb(x: np.ndarray) -> np.ndarray:
 class DelighterInferenceEngine:
     TILE_SIZE = 1024
 
-    def __init__(self, model_path: str = "weights/delighter_model_fp32.onnx"):
+    def __init__(self, model_path: str = "weights/delighter_model_fp16.onnx"):
         print("\n" + "="*50)
         print("[Engine Init] Initializing ONNX Runtime engine...")
         
@@ -159,7 +185,16 @@ class DelighterInferenceEngine:
         if not resolved_model_path.is_file():
             raise FileNotFoundError(f"Model file not found: {resolved_model_path}")
 
-        self.model = ort.InferenceSession(str(resolved_model_path), providers=providers)
+        try:
+            self.model = ort.InferenceSession(str(resolved_model_path), providers=providers)
+        except Exception as provider_error:
+            if providers and providers[0] != "CPUExecutionProvider" and not force_cpu:
+                failed_provider = providers[0][0] if isinstance(providers[0], tuple) else providers[0]
+                print(f"[Engine Init] {failed_provider} initialization failed; falling back to CPU: {provider_error}")
+                providers = ["CPUExecutionProvider"]
+                self.model = ort.InferenceSession(str(resolved_model_path), providers=providers)
+            else:
+                raise
         active_providers = self.model.get_providers()
         self.execution_provider = next(
             (provider for provider in active_providers if provider != "CPUExecutionProvider"),
@@ -167,8 +202,10 @@ class DelighterInferenceEngine:
         )
         self.hardware_device = _hardware_name_for_provider(self.execution_provider)
         self.runtime_name = "ONNX Runtime"
-        self.provider_name = "CUDA" if self.execution_provider == "CUDAExecutionProvider" else "CPU"
-        self.is_accelerated = self.execution_provider == "CUDAExecutionProvider"
+        self.provider_name = {
+            "CUDAExecutionProvider": "CUDA",
+        }.get(self.execution_provider, "CPU")
+        self.is_accelerated = self.execution_provider != "CPUExecutionProvider"
         self.device_info = f"{self.hardware_device} via {self.runtime_name} / {self.provider_name}"
         self.device_display = f"{self.runtime_name} · {self.provider_name}\n{self.hardware_device}"
         print(f"[Engine Init] Active Hardware Device: {self.device_info}")

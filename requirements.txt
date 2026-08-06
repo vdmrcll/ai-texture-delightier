@@ -3,3 +3,5 @@ tkinterdnd2>=0.3.0
 onnxruntime>=1.16.0
 Pillow>=9.0.0
 opencv-python-headless>=4.8.0.74
+PyOpenGL>=3.1.7
+pyopengltk>=0.0.4
