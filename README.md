@@ -51,13 +51,13 @@ The network expects **four input maps**:
 2. Download the app from the releases.
 3. Run the installer/start script depending on your OS.
 
-on Windows:
+Windows:
 
 ```text
 run.bat
 ```
 
-or Linux:
+Linux:
 
 ```text
 bash run.sh
