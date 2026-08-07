@@ -271,8 +271,15 @@ class DelighterInferenceEngine:
                     f"{name.capitalize()} resolution {tensor.shape[2]}x{tensor.shape[1]} "
                     f"does not match lit map resolution {w}x{h}"
                 )
-        if (h, w) != (2048, 2048):
-            log(f"WARNING: Model is trained for 2048x2048; received {w}x{h}.")
+
+        # Validate 1:1 aspect ratio, power of two, and max 8k limit
+        if h != w:
+            raise ValueError(f"Unsupported image aspect ratio: {w}x{h}. Only 1:1 square images are supported.")
+        if h > 8192:
+            raise ValueError(f"Image resolution {w}x{h} exceeds maximum supported resolution of 8192x8192.")
+        if (h & (h - 1)) != 0 or h <= 0:
+            raise ValueError(f"Image resolution {w}x{h} must be a power of two (e.g., 512, 1024, 2048, 4096, 8192).")
+
         log(f"Resolution: {w}x{h} px | Target Device: {self.device_info}")
 
         # 1. Color Space Conversion (sRGB -> Linear)
@@ -283,11 +290,12 @@ class DelighterInferenceEngine:
         log("Stacking 5-Channel Geometry Maps...")
         geometry_t = np.concatenate([normal_t, ao_t, mask_t], axis=0)
 
-        # 3. Tiled vs. Full Resolution Execution Strategy
-        tile_size = 1024 if tiled_mode else self.TILE_SIZE
-        mode_label = "tiled (blended)" if tiled_mode else "full-resolution"
+        # 3. Dynamic Tiling Execution Strategy
+        # Determine tile size: 1/2 of image size, or direct execution if < 2048
+        is_tiling_eligible = (h >= 2048) and tiled_mode
 
-        if tiled_mode and (h > tile_size or w > tile_size):
+        if is_tiling_eligible:
+            tile_size = h // 2
             overlap = tile_size // 4
             stride = tile_size - overlap
 
@@ -307,7 +315,7 @@ class DelighterInferenceEngine:
                 x_steps.append(w - tile_size)
 
             total_tiles = len(y_steps) * len(x_steps)
-            log(f"Processing in {mode_label} mode: {total_tiles} x {tile_size}x{tile_size} tiles...")
+            log(f"Processing in tiled mode (half-size tiles): {total_tiles} x {tile_size}x{tile_size} tiles...")
 
             accumulator = np.zeros((3, h, w), dtype=np.float32)
             weight_map = np.zeros((1, h, w), dtype=np.float32)
@@ -337,12 +345,18 @@ class DelighterInferenceEngine:
             pred_albedo_linear = accumulator / np.maximum(weight_map, 1e-7)
 
         else:
-            log(f"Processing in {mode_label} mode...")
+            if h < 2048:
+                log("Image resolution below 2048x2048: Processing full image without tiling...")
+            else:
+                log("Processing in full-resolution mode...")
+
             lit_tile = lit_linear
             geo_tile = geometry_t
 
-            pad_h = max(0, tile_size - h)
-            pad_w = max(0, tile_size - w)
+            # Fallback padding if image is smaller than standard model patch target
+            target_patch = min(h, self.TILE_SIZE)
+            pad_h = max(0, target_patch - h)
+            pad_w = max(0, target_patch - w)
             if pad_h or pad_w:
                 lit_tile = np.pad(lit_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
                 geo_tile = np.pad(geo_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
