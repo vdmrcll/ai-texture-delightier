@@ -33,10 +33,11 @@ class DelighterGUI:
         self.root = CTkApp()
         self._configure_dpi_scaling()
         self.root.title("Texture Delighter | Beta")
-        self.root.geometry("1180x820")
-        self.root.minsize(980, 700)
+        self.root.geometry("1024x720")
+        self.root.minsize(880, 620)
         self.root.resizable(True, True)
         self.viewport_fov = ctk.IntVar(value=50)
+        self.inference_mode = tk.StringVar(value="tiled")
         self._build_menu()
 
         self.engine = None
@@ -58,22 +59,15 @@ class DelighterGUI:
         self._load_engine_async()
 
     def _configure_dpi_scaling(self):
-        """Keep the fixed 1080p layout from becoming oversized on high-DPI displays."""
+        """Allow CustomTkinter to handle standard OS scaling natively."""
         try:
             dpi = float(self.root.winfo_fpixels("1i"))
             system_scale = max(1.0, dpi / 96.0)
-            screen_scale = max(
-                self.root.winfo_screenwidth() / 2560.0,
-                self.root.winfo_screenheight() / 1440.0,
-            )
-            # Some Windows configurations report 96 DPI even on a 4K monitor.
-            system_scale = max(system_scale, screen_scale)
         except (AttributeError, tk.TclError, TypeError, ValueError):
             system_scale = 1.0
 
-        ui_scale = 1.0 / system_scale
-        ctk.set_widget_scaling(ui_scale)
-        ctk.set_window_scaling(ui_scale)
+        ctk.set_widget_scaling(0.85)
+        ctk.set_window_scaling(0.88)
 
     def _load_engine_async(self):
         model_name = os.path.join("weights", MODEL_FILENAME)
@@ -142,7 +136,7 @@ class DelighterGUI:
         file_menu.add_separator()
         preferences_menu = Menu(file_menu, **menu_colors)
         fov_menu = Menu(preferences_menu, **menu_colors)
-        for fov in (30, 45, 50):
+        for fov in (30, 40, 50):
             fov_menu.add_radiobutton(
                 label=f"{fov}°",
                 variable=self.viewport_fov,
@@ -150,6 +144,20 @@ class DelighterGUI:
                 command=lambda value=fov: self._set_viewport_fov(value),
             )
         preferences_menu.add_cascade(label="Viewport FOV", menu=fov_menu)
+        inference_menu = Menu(preferences_menu, **menu_colors)
+        inference_menu.add_radiobutton(
+            label="Full (High VRAM)",
+            variable=self.inference_mode,
+            value="full",
+            command=lambda: self._set_inference_mode("full"),
+        )
+        inference_menu.add_radiobutton(
+            label="Tiled (Low VRAM)",
+            variable=self.inference_mode,
+            value="tiled",
+            command=lambda: self._set_inference_mode("tiled"),
+        )
+        preferences_menu.add_cascade(label="Inference mode", menu=inference_menu)
         file_menu.add_cascade(label="Preferences", menu=preferences_menu)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.destroy)
@@ -238,13 +246,13 @@ class DelighterGUI:
         self.root.grid_rowconfigure(2, weight=1)
 
         header_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        header_frame.grid(row=1, column=0, sticky="ew", padx=28, pady=(10, 6))
+        header_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(10, 6))
         header_frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(header_frame, text="Texture workspace", font=("Arial", 13, "bold"), text_color="#9AA4B2").grid(row=0, column=0, sticky="w")
 
         workspace = ctk.CTkFrame(self.root, fg_color="transparent")
-        workspace.grid(row=2, column=0, sticky="nsew", padx=28, pady=(0, 12))
+        workspace.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 10))
         workspace.grid_columnconfigure(0, weight=2)
         workspace.grid_columnconfigure(1, weight=5)
         workspace.grid_rowconfigure(0, weight=1)
@@ -293,15 +301,15 @@ class DelighterGUI:
         for index, (label_text, key, placeholder) in enumerate(slots):
             row_number = 2 + index
             row = ctk.CTkFrame(input_frame, fg_color="transparent")
-            row.grid(row=row_number, column=0, sticky="ew", padx=20, pady=(0, 8))
+            row.grid(row=row_number, column=0, sticky="ew", padx=14, pady=(0, 4))
             row.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(row, text=label_text, anchor="w", font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
             variable = self.model_path if key == "model" else self.paths[key]
-            entry = ctk.CTkEntry(row, textvariable=variable, placeholder_text=placeholder, height=32)
+            entry = ctk.CTkEntry(row, textvariable=variable, placeholder_text=placeholder, height=28)
             entry.grid(row=1, column=0, sticky="ew", padx=(0, 6))
             entry.drop_target_register(DND_FILES)
             entry.dnd_bind('<<Drop>>', lambda e, k=key: self._handle_drop(e, k))
-            ctk.CTkButton(row, text="Browse", width=70, height=32, command=lambda k=key: self._browse_file_or_dir(k)).grid(row=1, column=1)
+            ctk.CTkButton(row, text="Browse", width=65, height=28, command=lambda k=key: self._browse_file_or_dir(k)).grid(row=1, column=1)
 
         texture_choice = ctk.CTkFrame(input_frame, fg_color="transparent")
         texture_choice.grid(row=8, column=0, sticky="ew", padx=20, pady=(0, 8))
@@ -330,7 +338,7 @@ class DelighterGUI:
         action_frame.grid_columnconfigure(1, weight=1)
 
         self.status_label = ctk.CTkLabel(action_frame, text="Status: Initializing...", font=("Arial", 10, "bold"), text_color="#FFC107")
-        self.status_label.grid(row=0, column=0, sticky="w", padx=(28, 20), pady=10)
+        self.status_label.grid(row=0, column=0, sticky="w", padx=(16, 12), pady=8)
         self.hw_label = ctk.CTkLabel(action_frame, text="Device: Initializing...", font=("Arial", 10), text_color="#9AA4B2")
         self.hw_label.grid(row=0, column=1, sticky="w", pady=10)
         self.precision_label = ctk.CTkLabel(action_frame, text="Model: FP16", font=("Arial", 10), text_color="#9AA4B2")
@@ -344,7 +352,7 @@ class DelighterGUI:
             width=156,
             command=self._start_processing
         )
-        self.process_btn.grid(row=0, column=3, sticky="e", padx=(0, 28), pady=7)
+        self.process_btn.grid(row=0, column=3, sticky="e", padx=(0, 16), pady=6)
 
     def _validate_resolution(self, filepath):
         try:
@@ -363,6 +371,11 @@ class DelighterGUI:
         self.viewport_fov.set(int(fov))
         if self.viewport:
             self.viewport.set_fov(fov)
+
+    def _set_inference_mode(self, mode):
+        self.inference_mode.set(mode)
+        label = "full resolution" if mode == "full" else "1024px tiled"
+        self._append_log(f"Inference mode: {label}")
 
     def _refresh_viewport(self):
         if not self.viewport:
@@ -505,7 +518,13 @@ class DelighterGUI:
         def _work():
             try:
                 out_file, dims, dev = self.engine.process_texture(
-                    lit, norm, ao, mask, output_path, log_callback=log_ui
+                    lit,
+                    norm,
+                    ao,
+                    mask,
+                    output_path,
+                    log_callback=log_ui,
+                    tiled_mode=self.inference_mode.get() == "tiled",
                 )
                 self.root.after(0, lambda: self._on_success(out_file, dims, dev))
             except Exception as e:

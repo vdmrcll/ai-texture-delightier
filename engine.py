@@ -66,8 +66,6 @@ def _hardware_name_for_provider(provider: str) -> str:
         return _cpu_model_name()
 
     if provider == "CUDAExecutionProvider":
-        # ONNX Runtime exposes the CUDA provider, but not the GPU model name.
-        # nvidia-smi is available with standard NVIDIA driver installations.
         nvidia_smi = shutil.which("nvidia-smi")
         if nvidia_smi:
             try:
@@ -85,8 +83,6 @@ def _hardware_name_for_provider(provider: str) -> str:
                 pass
         return "NVIDIA GPU"
 
-    # Keep unknown providers generic so a different ONNX Runtime build is not
-    # presented as supported before the provider is explicitly wired in.
     return provider.replace("ExecutionProvider", "") + " device"
 
 
@@ -141,7 +137,7 @@ def linear_to_srgb(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
 
 class DelighterInferenceEngine:
-    TILE_SIZE = 1024
+    TILE_SIZE = 2048
 
     def __init__(self, model_path: str = "weights/delighter_model_fp16.onnx"):
         print("\n" + "="*50)
@@ -153,9 +149,6 @@ class DelighterInferenceEngine:
             providers = ["CPUExecutionProvider"]
             print("[Engine Init] CPU fallback forced by DELIGHTER_FORCE_CPU")
         elif "CUDAExecutionProvider" in available_providers:
-            # EXHAUSTIVE is ONNX Runtime's default cuDNN convolution search
-            # and can take an extremely long time on older GPUs such as the
-            # GTX 1080 Ti. HEURISTIC keeps the first inference responsive.
             providers = [
                 (
                     "CUDAExecutionProvider",
@@ -169,12 +162,8 @@ class DelighterInferenceEngine:
         else:
             providers = ["CPUExecutionProvider"]
         
-        # Resolve relative model paths from the application directory, not the
-        # caller's current working directory.
         resolved_model_path = Path(model_path)
         if not resolved_model_path.is_absolute():
-            # In a PyInstaller build, keep external assets beside the .exe
-            # instead of looking inside the bundled _internal directory.
             if getattr(sys, "frozen", False):
                 app_dir = Path(sys.executable).resolve().parent
             else:
@@ -222,8 +211,6 @@ class DelighterInferenceEngine:
             raise FileNotFoundError(f"Failed to load image at: {path}")
 
         if np.issubdtype(img.dtype, np.floating):
-            # OpenCV returns EXR/HDR data as float32. These formats are
-            # normally already normalized to 0..1 for this model.
             scale = 1.0
         elif img.dtype == np.uint16:
             scale = 65535.0
@@ -258,7 +245,8 @@ class DelighterInferenceEngine:
         ao_path: str, 
         mask_path: str, 
         output_save_path: str,
-        log_callback=None
+        log_callback=None,
+        tiled_mode: bool = False,
     ):
         def log(msg):
             print(f"[Inference] {msg}")
@@ -295,47 +283,85 @@ class DelighterInferenceEngine:
         log("Stacking 5-Channel Geometry Maps...")
         geometry_t = np.concatenate([normal_t, ao_t, mask_t], axis=0)
 
-        # 3. Run the network on the 1024x1024 tiles it was trained on.
-        # Edge tiles are padded and cropped back after inference.
-        tile_size = self.TILE_SIZE
-        tiles_y = (h + tile_size - 1) // tile_size
-        tiles_x = (w + tile_size - 1) // tile_size
-        total_tiles = tiles_y * tiles_x
-        log(f"Processing {total_tiles} x {tile_size}x{tile_size} tiles...")
-        pred_albedo_linear = np.empty((3, h, w), dtype=np.float32)
-        tile_number = 0
+        # 3. Tiled vs. Full Resolution Execution Strategy
+        tile_size = 1024 if tiled_mode else self.TILE_SIZE
+        mode_label = "tiled (blended)" if tiled_mode else "full-resolution"
 
-        for y0 in range(0, h, tile_size):
-            for x0 in range(0, w, tile_size):
-                tile_number += 1
-                tile_h = min(tile_size, h - y0)
-                tile_w = min(tile_size, w - x0)
-                lit_tile = lit_linear[:, y0:y0 + tile_h, x0:x0 + tile_w]
-                geo_tile = geometry_t[:, y0:y0 + tile_h, x0:x0 + tile_w]
+        if tiled_mode and (h > tile_size or w > tile_size):
+            overlap = tile_size // 4
+            stride = tile_size - overlap
 
-                pad_h = tile_size - tile_h
-                pad_w = tile_size - tile_w
-                if pad_h or pad_w:
-                    lit_tile = np.pad(lit_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
-                    geo_tile = np.pad(geo_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+            # 2D cosine window for edge blending
+            ramp_1d = 0.5 * (1.0 - np.cos(np.pi * np.linspace(0, 1, overlap)))
+            weight_1d = np.ones(tile_size, dtype=np.float32)
+            weight_1d[:overlap] = ramp_1d
+            weight_1d[-overlap:] = ramp_1d[::-1]
+            tile_weights = np.outer(weight_1d, weight_1d)[np.newaxis, :, :]
 
-                log(f"Executing tile {tile_number}/{total_tiles}...")
-                outputs = self.model.run(
-                    [self.output_name],
-                    {
-                        self.input_names[0]: np.expand_dims(lit_tile, axis=0).astype(np.float32),
-                        self.input_names[1]: np.expand_dims(geo_tile, axis=0).astype(np.float32),
-                    },
-                )
-                tile_prediction = outputs[0][0, :, :tile_h, :tile_w]
-                pred_albedo_linear[:, y0:y0 + tile_h, x0:x0 + tile_w] = tile_prediction
+            y_steps = list(range(0, max(1, h - tile_size + 1), stride))
+            if y_steps[-1] + tile_size < h:
+                y_steps.append(h - tile_size)
 
-        # 5. Convert Linear -> sRGB & Apply UV Mask
+            x_steps = list(range(0, max(1, w - tile_size + 1), stride))
+            if x_steps[-1] + tile_size < w:
+                x_steps.append(w - tile_size)
+
+            total_tiles = len(y_steps) * len(x_steps)
+            log(f"Processing in {mode_label} mode: {total_tiles} x {tile_size}x{tile_size} tiles...")
+
+            accumulator = np.zeros((3, h, w), dtype=np.float32)
+            weight_map = np.zeros((1, h, w), dtype=np.float32)
+            tile_number = 0
+
+            for y0 in y_steps:
+                for x0 in x_steps:
+                    tile_number += 1
+                    y1, x1 = y0 + tile_size, x0 + tile_size
+
+                    lit_tile = lit_linear[:, y0:y1, x0:x1]
+                    geo_tile = geometry_t[:, y0:y1, x0:x1]
+
+                    log(f"Executing tile {tile_number}/{total_tiles}...")
+                    outputs = self.model.run(
+                        [self.output_name],
+                        {
+                            self.input_names[0]: np.expand_dims(lit_tile, axis=0).astype(np.float32),
+                            self.input_names[1]: np.expand_dims(geo_tile, axis=0).astype(np.float32),
+                        },
+                    )
+                    tile_prediction = outputs[0][0]
+
+                    accumulator[:, y0:y1, x0:x1] += tile_prediction * tile_weights
+                    weight_map[:, y0:y1, x0:x1] += tile_weights
+
+            pred_albedo_linear = accumulator / np.maximum(weight_map, 1e-7)
+
+        else:
+            log(f"Processing in {mode_label} mode...")
+            lit_tile = lit_linear
+            geo_tile = geometry_t
+
+            pad_h = max(0, tile_size - h)
+            pad_w = max(0, tile_size - w)
+            if pad_h or pad_w:
+                lit_tile = np.pad(lit_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+                geo_tile = np.pad(geo_tile, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+
+            outputs = self.model.run(
+                [self.output_name],
+                {
+                    self.input_names[0]: np.expand_dims(lit_tile, axis=0).astype(np.float32),
+                    self.input_names[1]: np.expand_dims(geo_tile, axis=0).astype(np.float32),
+                },
+            )
+            pred_albedo_linear = outputs[0][0, :, :h, :w]
+
+        # 4. Convert Linear -> sRGB & Apply UV Mask
         log("Converting predicted Albedo to sRGB space...")
         pred_srgb = linear_to_srgb(pred_albedo_linear)
         pred_srgb = pred_srgb * mask_t
 
-        # 6. Save output map to disk
+        # 5. Save output map to disk
         log("Saving final 8-bit image to disk...")
         pred_np = np.transpose(pred_srgb, (1, 2, 0))
         pred_8bit = (np.clip(pred_np, 0.0, 1.0) * 255.0).astype(np.uint8)
