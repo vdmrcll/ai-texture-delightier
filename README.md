@@ -6,8 +6,6 @@ This tool removes environmental lighting from 3D scanned assets, producing a cle
 
 ![Viewport Preview](https://github.com/vdmrcll/ai-texture-delightier/blob/main/preview.jpg)
 
-> **Status:** Early Beta — feedback and bug reports are very welcome.
-
 ## Requirements
 
 ### Operating System
